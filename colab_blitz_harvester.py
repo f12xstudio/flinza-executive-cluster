@@ -234,8 +234,10 @@ BATCH_SIZE = 2000
 
 # ─────────────────────────────────────────────────────────────────────
 class BlitzHarvester:
-    def __init__(self, concurrency: int = 150):
+    def __init__(self, concurrency: int = 150, slice_id: int = 0, total_slices: int = 1):
         self.concurrency   = concurrency
+        self.slice_id      = slice_id
+        self.total_slices  = total_slices
         self.seen_emails   = set()
         self.seen_domains  = set()
         self.niche_counts  = {k: 0 for k in NICHE_FILES}
@@ -635,8 +637,9 @@ class BlitzHarvester:
 
         size_mb = os.path.getsize(zip_path) / 1_048_576
         breakdown = "\n".join([f"  • <b>{n}:</b> {cnt:,} leads" for n, cnt in self.niche_counts.items()])
+        node_lbl = f"[Cluster Node {self.slice_id + 1}/{self.total_slices}] " if self.total_slices > 1 else ""
         msg = (
-            f"🎯 <b>FLINZA CHECKPOINT: Batch {self._batch_num}</b>\n"
+            f"🎯 <b>FLINZA CHECKPOINT: {node_lbl}Batch {self._batch_num}</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"✉ <b>Total Verified Leads:</b> {self._total_found:,}\n"
             f"📦 <b>Zip Package:</b> <code>{os.path.basename(zip_path)}</code> ({size_mb:.1f} MB)\n\n"
@@ -774,6 +777,12 @@ class BlitzHarvester:
         stores = self.load_stores(master_csv_path)
         if not stores:
             print("[ERROR] No stores to scan."); return
+
+        if self.total_slices > 1:
+            raw_total = len(stores)
+            stores = stores[self.slice_id::self.total_slices]
+            print(f"[*] Cluster Partitioning Active: Node {self.slice_id + 1}/{self.total_slices}", flush=True)
+            print(f"[*] Assigned {len(stores):,} stores out of {raw_total:,} total (Zero Overlap)", flush=True)
 
         total_stores = len(stores)
         queue: asyncio.Queue = asyncio.Queue()
@@ -986,11 +995,15 @@ def main():
                    help="Path to full 1.9M Shopify master CSV")
     p.add_argument("--batch-size", type=int, default=BATCH_SIZE,
                    help="Auto-zip every N leads (default %(default)s)")
+    p.add_argument("--slice-id", type=int, default=0,
+                   help="0-indexed partition ID for distributed cluster nodes")
+    p.add_argument("--total-slices", type=int, default=1,
+                   help="Total number of cluster partitions (e.g. 25)")
     args = p.parse_args()
 
     BATCH_SIZE = args.batch_size
 
-    h = BlitzHarvester(concurrency=args.concurrency)
+    h = BlitzHarvester(concurrency=args.concurrency, slice_id=args.slice_id, total_slices=args.total_slices)
     asyncio.run(h.run(master_csv_path=args.master_csv))
 
 
