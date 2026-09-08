@@ -1,0 +1,11 @@
+# Ignore large data directories and archives
+data/
+*.zip
+*.gz
+*.xz
+*.csv
+__pycache__/
+*.pyc
+venv/
+.env
+.DS_Store
