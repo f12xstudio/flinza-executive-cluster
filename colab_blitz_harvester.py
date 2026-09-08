@@ -847,6 +847,10 @@ class BlitzHarvester:
             sem      = _pool_sems[sess_idx]
 
             while True:
+                # 0. Graceful shutdown check before GitHub Actions 6-hour hard timeout (5h 15m = 18,900s)
+                if time.time() - start_time > 18900:
+                    break
+
                 # 1. Wait if circuit breaker is paused
                 await breaker.wait()
 
@@ -951,10 +955,15 @@ class BlitzHarvester:
                 )
 
         async with client_cm:
-            tasks = [asyncio.create_task(worker(i))
-                     for i in range(self.concurrency)]
-            tasks.append(asyncio.create_task(stats_printer()))
-            await asyncio.gather(*tasks, return_exceptions=True)
+            worker_tasks = [asyncio.create_task(worker(i))
+                            for i in range(self.concurrency)]
+            printer_task = asyncio.create_task(stats_printer())
+            await asyncio.gather(*worker_tasks, return_exceptions=True)
+            printer_task.cancel()
+            try:
+                await printer_task
+            except asyncio.CancelledError:
+                pass
 
         # Close all session pool handles
         for sess in _session_pool:
