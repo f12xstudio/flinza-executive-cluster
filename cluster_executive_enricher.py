@@ -40,6 +40,12 @@ except Exception:
     pass
 
 import httpx
+try:
+    from curl_cffi.requests import AsyncSession
+    HAS_CURL = True
+except ImportError:
+    HAS_CURL = False
+
 from bs4 import BeautifulSoup
 
 
@@ -270,6 +276,8 @@ async def extract_founder_for_lead(client: httpx.AsyncClient, lead_row: Dict[str
 
     # Step 3: Deep NLP Pattern Matching on discovered pages
     patterns = [
+        # "founder, Brittany," or "founder Brittany" or "founder named Brittany"
+        r"(?:founder|co-founder|owner|ceo|creator)[,\s:]+(?:named\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
         # "Owner & Founder, Rachel Gutierrez" or "Founder & CEO, John Doe"
         r"(?:Owner\s*&\s*Founder|Founder\s*&\s*Owner|Founder|Co-Founder|CEO|Owner)[,\s:]+([A-Z][a-z]+\s+[A-Z][a-z]+)",
         # "A word from our founder Swati Bhardwaj has built..."
@@ -313,8 +321,18 @@ async def extract_founder_for_lead(client: httpx.AsyncClient, lead_row: Dict[str
                                     row["Exec_Email_Pattern"] = "derived_first"
                                     row["Exec_Bonus_Email"] = f"{fn.lower()}.{ln.lower()}@{domain}"
                                 return row
-                        elif len(parts) == 1 and row.get("Exec_First") == parts[0].capitalize():
-                            row["Exec_Confidence"] = "HIGH"
+                        elif len(parts) == 1:
+                            fn = parts[0].capitalize()
+                            if fn.lower() in COMMON_FIRST_NAMES and fn.lower() not in BANNED_WORDS:
+                                row["Exec_First"] = fn
+                                row["Exec_Name"] = fn
+                                row["Exec_Title"] = "Founder"
+                                row["Exec_Confidence"] = "HIGH"
+                                row["Exec_Source"] = "about_story_page"
+                                if not row.get("Exec_Email") or row.get("Exec_Email") == lead_email:
+                                    row["Exec_Email"] = f"{fn.lower()}@{domain}"
+                                    row["Exec_Email_Pattern"] = "derived_first"
+                                return row
         except Exception:
             continue
 
@@ -399,12 +417,17 @@ async def run_cluster_node(
     medium_count = 0
     standard_count = 0
 
-    async with httpx.AsyncClient(
-        headers=HEADERS,
-        timeout=timeout,
-        follow_redirects=True,
-        limits=httpx.Limits(max_connections=concurrency * 2, max_keepalive_connections=concurrency),
-    ) as client:
+    client_cm = (
+        AsyncSession(impersonate="chrome124") if HAS_CURL else
+        httpx.AsyncClient(
+            headers=HEADERS,
+            timeout=timeout,
+            follow_redirects=True,
+            limits=httpx.Limits(max_connections=concurrency * 2, max_keepalive_connections=concurrency),
+        )
+    )
+
+    async with client_cm as client:
         tasks = [
             extract_founder_for_lead(client, lead, sem, timeout)
             for lead in slice_leads
