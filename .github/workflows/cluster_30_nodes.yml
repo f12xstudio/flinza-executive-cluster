@@ -46,7 +46,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install httpx beautifulsoup4
+          pip install httpx beautifulsoup4 curl_cffi
 
       - name: Download 110k Master Leads Dataset
         run: |
@@ -66,7 +66,7 @@ jobs:
             --slice-id ${{ matrix.node_id }} \
             --total-slices 30 \
             --concurrency ${{ github.event.inputs.concurrency || '25' }} \
-            --timeout ${{ github.event.inputs.timeout || '4.0' }} \
+            --timeout ${{ github.event.inputs.timeout || '6.0' }} \
             --batch-notify ${{ github.event.inputs.batch_notify || '1000' }} \
             --input-csv data/FINAL_ALL_VERIFIED_LEADS_COMBINED.csv \
             --output-csv data/node_${{ matrix.node_id }}_executives.csv
