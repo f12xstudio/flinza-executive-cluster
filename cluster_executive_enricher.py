@@ -29,6 +29,7 @@ import hashlib
 import asyncio
 import argparse
 import urllib.request
+import urllib.parse
 from typing import Optional, Dict, Any, List, Tuple
 
 try:
@@ -154,29 +155,66 @@ def check_gravatar(email: str) -> bool:
 
 def is_clean_human_name(name: str, brand: str, domain: str) -> bool:
     parts = name.split()
-    if not (2 <= len(parts) <= 3):
+    if not (1 <= len(parts) <= 3):
         return False
-    fn, ln = parts[0], parts[-1]
+    fn = parts[0]
+    ln = parts[-1] if len(parts) > 1 else ""
     
     # 🛡️ HARD RULE 1: First name MUST be a recognized human given name
     if fn.lower() not in COMMON_FIRST_NAMES:
         return False
         
-    if not (fn[0].isupper() and ln[0].isupper()):
+    if not fn[0].isupper():
         return False
-    if fn.lower() in BANNED_WORDS or ln.lower() in BANNED_WORDS:
+    if ln and not ln[0].isupper():
         return False
-    if not (fn.isalpha() and ln.isalpha()):
+    if fn.lower() in BANNED_WORDS or (ln and ln.lower() in BANNED_WORDS):
         return False
-    if len(fn) < 2 or len(ln) < 2 or len(ln) > 22:
+    if not fn.isalpha() or (ln and not ln.isalpha()):
         return False
-        
-    # Brand/domain collision check
-    brand_tokens = [t.lower() for t in re.split(r'[^a-zA-Z0-9]+', brand) if len(t) >= 4]
-    domain_stem = domain.lower().split('.')[0]
-    if ln.lower() in brand_tokens or (len(domain_stem) >= 5 and ln.lower() == domain_stem):
+    if len(fn) < 2 or (ln and (len(ln) < 2 or len(ln) > 22)):
         return False
     return True
+
+VERIFIED_DIRECTORIES = {
+    'zoominfo.com', 'dnb.com', 'dandb.com', 'buzzfile.com', 'crunchbase.com',
+    'datanyze.com', 'bizapedia.com', 'linkedin.com', 'bloomberg.com', 'rocketreach.co',
+    'cortera.com', 'opencorporates.com'
+}
+
+def is_trusted_source(card_url: str, store_domain: str) -> bool:
+    card_url_lower = card_url.lower()
+    if store_domain.lower() in card_url_lower:
+        return True
+    return any(vd in card_url_lower for vd in VERIFIED_DIRECTORIES)
+
+def get_real_card_url(href: str) -> str:
+    m = re.search(r'/RU=(.*?)/RK=', href)
+    if m:
+        try:
+            return urllib.parse.unquote(m.group(1))
+        except Exception:
+            return href
+    return href
+
+def is_card_grounded(card_text: str, domain: str, brand: str) -> bool:
+    text_lower = card_text.lower()
+    domain_stem = domain.lower().split('.')[0]
+    
+    # Check domain stem
+    if len(domain_stem) >= 4 and domain_stem in text_lower:
+        return True
+        
+    # Check brand tokens
+    brand_tokens = [t.lower() for t in re.split(r'[^a-zA-Z0-9]+', brand) if len(t) >= 3 and t.lower() not in ('the', 'and', 'shop', 'store', 'online', 'inc', 'llc', 'ltd')]
+    if not brand_tokens:
+        return False
+        
+    matches = sum(1 for t in brand_tokens if t in text_lower)
+    if len(brand_tokens) == 1:
+        return matches >= 1
+    return matches >= min(2, len(brand_tokens))
+
 
 
 # ─── Dynamic Extraction Logic ─────────────────────────────────────────────────
@@ -276,6 +314,9 @@ async def extract_founder_for_lead(client: httpx.AsyncClient, lead_row: Dict[str
 
     # Step 3: Deep NLP Pattern Matching on discovered pages
     patterns = [
+        # Business Directory patterns (D&B, Buzzfile, Datanyze)
+        r"Contacts\s+([A-Z][a-z]+\s+[A-Z][a-z]+)",
+        r"(?:Key\s+Executive|Executive|Owner|Founder|CEO|President)[s\s:]+([A-Z][a-z]+\s+[A-Z][a-z]+)",
         # "founder, Brittany," or "founder Brittany" or "founder named Brittany"
         r"(?:founder|co-founder|owner|ceo|creator)[,\s:]+(?:named\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
         # "Owner & Founder, Rachel Gutierrez" or "Founder & CEO, John Doe"
@@ -335,6 +376,63 @@ async def extract_founder_for_lead(client: httpx.AsyncClient, lead_row: Dict[str
                                 return row
         except Exception:
             continue
+
+    # Step 4: Strictly Grounded & Trusted Search Intelligence
+    if domain:
+        try:
+            q = f"{domain} founder"
+            y_url = f"https://search.yahoo.com/search?p={urllib.parse.quote(q)}"
+            async with sem:
+                y_resp = await client.get(y_url, timeout=timeout)
+            if y_resp.status_code == 200:
+                y_soup = BeautifulSoup(y_resp.text, 'html.parser')
+                for div in y_soup.find_all('div', class_='algo'):
+                    a_tag = div.find('a', href=True)
+                    raw_href = a_tag['href'] if a_tag else ''
+                    real_url = get_real_card_url(raw_href)
+
+                    # 🛡️ STRICT AUTHORITY CHECK: Must be verified directory or store's own domain
+                    if not is_trusted_source(real_url, domain):
+                        continue
+
+                    card_text = div.get_text(separator=' ', strip=True)
+                    # 🛡️ STRICT GROUNDING CHECK: Card must mention domain or brand
+                    if not is_card_grounded(card_text, domain, brand):
+                        continue
+
+                    for pat in patterns:
+                        for m in re.finditer(pat, card_text, re.IGNORECASE):
+                            cand = m.group(1).strip()
+                            parts = cand.split()
+                            if len(parts) >= 2:
+                                fn, ln = parts[0].capitalize(), parts[1].capitalize()
+                                cand_name = f"{fn} {ln}"
+                                if is_clean_human_name(cand_name, brand, domain):
+                                    row["Exec_First"] = fn
+                                    row["Exec_Last"] = ln
+                                    row["Exec_Name"] = cand_name
+                                    row["Exec_Title"] = "Founder / Owner"
+                                    row["Exec_Confidence"] = "HIGH"
+                                    row["Exec_Source"] = "search_engine_intelligence"
+                                    if not row.get("Exec_Email") or row.get("Exec_Email") == lead_email:
+                                        row["Exec_Email"] = f"{fn.lower()}@{domain}"
+                                        row["Exec_Email_Pattern"] = "derived_first"
+                                        row["Exec_Bonus_Email"] = f"{fn.lower()}.{ln.lower()}@{domain}"
+                                    return row
+                            elif len(parts) == 1:
+                                fn = parts[0].capitalize()
+                                if fn.lower() in COMMON_FIRST_NAMES and fn.lower() not in BANNED_WORDS:
+                                    row["Exec_First"] = fn
+                                    row["Exec_Name"] = fn
+                                    row["Exec_Title"] = "Founder"
+                                    row["Exec_Confidence"] = "HIGH"
+                                    row["Exec_Source"] = "search_engine_intelligence"
+                                    if not row.get("Exec_Email") or row.get("Exec_Email") == lead_email:
+                                        row["Exec_Email"] = f"{fn.lower()}@{domain}"
+                                        row["Exec_Email_Pattern"] = "derived_first"
+                                    return row
+        except Exception:
+            pass
 
     return row
 
