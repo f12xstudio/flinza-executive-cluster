@@ -51,6 +51,7 @@ import asyncio
 import argparse
 import urllib.request
 import urllib.parse
+import socket
 from typing import Optional, Dict, Any, List, Set, Tuple
 
 try:
@@ -190,6 +191,14 @@ BANNED_WORDS = {
     "join","connect","watch","buy","save","get","see","new","now","today",
     "next","last","first","second","third","free","best","top","great",
     "good","nice","love","life","time","day","week","month","year",
+    # US States & Geographical locations (common review/testimonial location false positives)
+    "ohio","california","texas","florida","york","georgia","michigan","illinois",
+    "pennsylvania","virginia","washington","arizona","massachusetts","tennessee",
+    "indiana","missouri","maryland","wisconsin","colorado","minnesota","alabama",
+    "louisiana","kentucky","oregon","oklahoma","connecticut","utah","iowa","nevada",
+    "arkansas","mississippi","kansas","mexico","london","paris","berlin","tokyo",
+    "china","india","japan","germany","france","italy","spain","england","scotland",
+    "ireland","wales","default","appointment","personalised","timeless","studios",
     # Prepositions / connectors that appear after names in titles
     "for","of","at","with","and","but","or","nor","yet","so",
     "as","in","on","by","to","up","do","go","be","is",
@@ -229,8 +238,13 @@ VERIFIED_DIRECTORIES = {
     'abr.business.gov.au','sec.gov',
 }
 
-# 20+ NLP patterns for founder name extraction
+# 25+ NLP patterns for founder name extraction (including DTC brand narrative patterns)
 FOUNDER_PATTERNS = [
+    # DTC Co-founder and compound patterns
+    r"(?:founded|started|created|launched|established)\s+(?:officially\s+)?(?:in\s+\d{4}\s+)?by\s+(?:(?:Founder|Co-Founder|CEO|Owner|President|Creator)\s*(?:&|and|/)?\s*(?:CEO|COO|Owner)?\s*[,:]\s*)?([A-Z][a-z]+(?:\s+and\s+[A-Z][a-z]+)?\s+[A-Z][a-z]+)",
+    r"by\s+([A-Z][a-z]+)\s+and\s+([A-Z][a-z]+\s+[A-Z][a-z]+)",
+    r"([A-Z][a-z]+\s+[A-Z][a-z]+)\s*[\r\n,–—|-]+\s*(?:Co-Founder|Founder|CEO|Owner|COO|President|Creator|Managing\s+Director)",
+    r"(?:began|started|born)\s+with\s+[^.!?]{5,120}?[.!?]\s+([A-Z][a-z]+\s+[A-Z][a-z]+)\s+(?:wanted|set\s+out|decided)\s+to\s+(?:build|create|start|launch)",
     r"Contacts\s+([A-Z][a-z]+\s+[A-Z][a-z]+)",
     r"(?:Key\s+Executive|Executive|Owner|Founder|CEO|President)[s\s:]+([A-Z][a-z]+\s+[A-Z][a-z]+)",
     r"(?:founder|co-founder|owner|ceo|creator)[,\s:]+(?:named\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
@@ -244,7 +258,7 @@ FOUNDER_PATTERNS = [
     r"([A-Z][a-z]+\s+[A-Z][a-z]+)\s+(?:founded|started|launched|created|established)\s+(?:the\s+)?(?:company|brand|store|business|shop)",
     r'"name"\s*:\s*"([A-Z][a-z]+\s+[A-Z][a-z]+)"[^}]*"@type"\s*:\s*"Person"',
     r'"@type"\s*:\s*"Person"[^}]*"name"\s*:\s*"([A-Z][a-z]+\s+[A-Z][a-z]+)"',
-    r"[Bb]y[:\s]+([A-Z][a-z]+\s+[A-Z][a-z]+)\s*[,\|]?\s*(?:CEO|Founder|Owner|Creator)?",
+    r"[Bb]y[:\s]+([A-Z][a-z]+\s+[A-Z][a-z]+)\s*[,\|]\s*(?:CEO|Founder|Co-Founder|Owner|Creator|President|Managing\s+Director)",
     r"[Ww]ritten\s+by\s+([A-Z][a-z]+\s+[A-Z][a-z]+)",
     r"[Aa]bout\s+([A-Z][a-z]+\s+[A-Z][a-z]+)\s*[\u2013-]",
     r"(?:\u00a9|\bCopyright\b)\s*\d{4}\s+([A-Z][a-z]+\s+[A-Z][a-z]+)",
@@ -276,13 +290,13 @@ def check_gravatar(email: str) -> bool:
     except Exception:
         return False
 
-def is_clean_human_name(name: str, brand: str = "", domain: str = "") -> bool:
+def is_clean_human_name(name: str, brand: str = "", domain: str = "", strict_first_name: bool = False) -> bool:
     parts = name.split()
     if not (1 <= len(parts) <= 4):
         return False
     fn = parts[0]
     ln = parts[-1] if len(parts) > 1 else ""
-    if fn.lower() not in COMMON_FIRST_NAMES:
+    if strict_first_name and fn.lower() not in COMMON_FIRST_NAMES:
         return False
     if not fn[0].isupper():
         return False
@@ -296,12 +310,10 @@ def is_clean_human_name(name: str, brand: str = "", domain: str = "") -> bool:
     if len(fn) < 2 or (ln and (len(ln) < 2 or len(ln) > 30)):
         return False
     if brand:
-        brand_lower = brand.lower().replace(" ", "")
-        name_lower = name.lower().replace(" ", "")
-        if brand_lower == name_lower or name_lower in brand_lower:
+        brand_clean = ''.join(c for c in brand.lower() if c.isalnum())
+        name_clean = ''.join(c for c in name.lower() if c.isalnum())
+        if brand_clean == name_clean or name_clean in brand_clean:
             return False
-        # Reject if the last name IS one of the brand's own distinctive tokens
-        # e.g. 'Anna Atelier' for brand 'Atelier Ana' - 'Atelier' is a brand word
         if ln:
             brand_tokens_set = {
                 t.lower() for t in re.split(r'[^a-zA-Z0-9]+', brand)
@@ -311,7 +323,7 @@ def is_clean_human_name(name: str, brand: str = "", domain: str = "") -> bool:
                 return False
     if domain:
         domain_stem = domain.lower().split('.')[0]
-        if fn.lower() == domain_stem:
+        if fn.lower() == domain_stem or (ln and ln.lower() == domain_stem):
             return False
     return True
 
@@ -537,6 +549,7 @@ async def deep_site_crawl(client, domain: str, brand: str, sem: asyncio.Semaphor
                            timeout: float) -> Optional[Tuple[str, str, str]]:
     about_urls = []
 
+    # 1. Fetch homepage first
     home_html = await fetch(client, f"https://{domain}", sem, timeout)
     if home_html:
         schema_result = extract_schema_person(home_html, brand, domain)
@@ -558,28 +571,32 @@ async def deep_site_crawl(client, domain: str, brand: str, sem: asyncio.Semaphor
         except Exception:
             pass
 
+    # 2. Standard high-yield paths for e-commerce DTC stores
     standard_paths = [
         '/pages/about-us','/pages/our-story','/pages/about','/about',
         '/pages/team','/pages/meet-the-founder','/pages/meet-the-team',
-        '/pages/founders-story','/pages/our-founders','/pages/who-we-are',
-        '/pages/our-mission','/pages/founder','/about-us','/our-story',
-        '/team','/pages/our-family','/pages/history',
+        '/pages/founders-story','/pages/our-founders','/about-us','/our-story',
+        '/policies/terms-of-service','/policies/privacy-policy','/pages/contact-us',
     ]
     for p in standard_paths:
         u = f"https://{domain}{p}"
         if u not in about_urls:
             about_urls.append(u)
 
-    for page_url in about_urls[:8]:
-        html = await fetch(client, page_url, sem, timeout)
-        if not html or len(html) < 400:
+    # 3. Parallel fetch of candidate URLs (fast & concurrent)
+    candidate_urls = about_urls[:7]
+    pages_html = await asyncio.gather(*[fetch(client, u, sem, timeout) for u in candidate_urls], return_exceptions=True)
+
+    for i, html in enumerate(pages_html):
+        if not html or isinstance(html, Exception) or len(html) < 250:
             continue
+        page_url = candidate_urls[i]
         try:
             schema_result = extract_schema_person(html, brand, domain)
             if schema_result:
                 return schema_result[0], schema_result[1], f"schema:{page_url.split('/')[-1]}"
             soup = BeautifulSoup(html, 'html.parser')
-            for el in soup(['script', 'style', 'nav', 'footer', 'noscript', 'header']):
+            for el in soup(['script', 'style', 'nav', 'footer', 'header']):
                 el.decompose()
             clean_text = " ".join(soup.get_text(separator=" ", strip=True).split())
             result = extract_name_from_patterns(clean_text, brand, domain)
@@ -594,17 +611,17 @@ async def deep_site_crawl(client, domain: str, brand: str, sem: asyncio.Semaphor
 # ── TIER 3: Multi-Engine Search ───────────────────────────────────────────────
 
 async def search_yahoo(client, domain: str, brand: str, sem: asyncio.Semaphore, timeout: float) -> Optional[Tuple[str, str, str]]:
-    """Yahoo Search — uses quoted domain for tight matching, falls back to brand query."""
+    """Yahoo Search — uses clean queries to avoid 500 errors."""
     queries = [
-        f'"{domain}" founder OR owner OR CEO',      # Quoted domain = most precise
-        f'"{brand}" founder owner CEO site:linkedin.com OR site:crunchbase.com OR site:dnb.com OR site:buzzfile.com',
+        f'"{domain}" founder OR owner',
+        f'"{brand}" founder owner site:linkedin.com',
     ]
     for q in queries:
-        url = f"https://search.yahoo.com/search?p={urllib.parse.quote(q)}"
-        html = await fetch(client, url, sem, timeout)
-        if not html:
-            continue
         try:
+            url = f"https://search.yahoo.com/search?p={urllib.parse.quote(q)}"
+            html = await fetch(client, url, sem, timeout)
+            if not html:
+                continue
             soup = BeautifulSoup(html, 'html.parser')
             for div in soup.find_all('div', class_='algo'):
                 a_tag = div.find('a', href=True)
@@ -624,17 +641,16 @@ async def search_yahoo(client, domain: str, brand: str, sem: asyncio.Semaphore, 
 
 
 async def search_ddg(client, domain: str, brand: str, sem: asyncio.Semaphore, timeout: float) -> Optional[Tuple[str, str, str]]:
-    for q in [f"{domain} owner founder", f'"{brand}" CEO founder owner']:
-        try:
-            data = urllib.parse.urlencode({'q': q}).encode()
-            async with sem:
-                resp = await client.post(
-                    'https://lite.duckduckgo.com/lite/', content=data,
-                    headers={**random.choice(HEADERS_POOL), 'Content-Type': 'application/x-www-form-urlencoded'},
-                    timeout=timeout
-                )
-            if resp.status_code != 200:
-                continue
+    """DuckDuckGo Lite with tight 2.0s non-blocking timeout."""
+    try:
+        data = urllib.parse.urlencode({'q': f"{domain} owner founder"}).encode()
+        async with sem:
+            resp = await client.post(
+                'https://lite.duckduckgo.com/lite/', content=data,
+                headers={**random.choice(HEADERS_POOL), 'Content-Type': 'application/x-www-form-urlencoded'},
+                timeout=min(timeout, 2.0)
+            )
+        if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
             for a in soup.find_all('a', class_='result-link'):
                 href = a.get('href', '')
@@ -649,26 +665,25 @@ async def search_ddg(client, domain: str, brand: str, sem: asyncio.Semaphore, ti
                 result = extract_name_from_patterns(card_text, brand, domain)
                 if result and result[1]:
                     return result[0], result[1], f"ddg:{result[2]}"
-        except Exception:
-            continue
+    except Exception:
+        pass
     return None
 
 
 async def search_bing(client, domain: str, brand: str, sem: asyncio.Semaphore, timeout: float) -> Optional[Tuple[str, str, str]]:
+    """Bing Search — matches class_ directly (catches li.b_algo and div.b_algo)."""
     for q in [f"{domain} founder owner", f'"{brand}" site:linkedin.com OR site:crunchbase.com founder']:
-        url = f"https://www.bing.com/search?q={urllib.parse.quote(q)}"
-        html = await fetch(client, url, sem, timeout)
-        if not html:
-            continue
         try:
+            url = f"https://www.bing.com/search?q={urllib.parse.quote(q)}"
+            html = await fetch(client, url, sem, timeout)
+            if not html:
+                continue
             soup = BeautifulSoup(html, 'html.parser')
-            for div in soup.find_all('div', class_=['b_algo', 'b_entityTP', 'b_rich']):
-                card_text = div.get_text(separator=' ', strip=True)
-                # Must mention domain or brand — strict grounding
+            for item in soup.find_all(class_=['b_algo', 'b_entityTP', 'b_rich']):
+                card_text = item.get_text(separator=' ', strip=True)
                 if not is_card_grounded(card_text, domain, brand):
                     continue
-                # Also check link URL is trusted
-                a_tag = div.find('a', href=True)
+                a_tag = item.find('a', href=True)
                 if a_tag:
                     href = a_tag.get('href', '')
                     if not is_trusted_source(href, domain):
@@ -698,13 +713,11 @@ async def linkedin_dork(client, domain: str, brand: str, sem: asyncio.Semaphore,
                 if 'linkedin.com/in/' not in real_url.lower():
                     continue
                 card_text = div.get_text(separator=' ', strip=True)
-                # STRICT grounding: LinkedIn card must mention our brand or domain
                 if not is_card_grounded(card_text, domain, brand):
                     continue
                 result = extract_name_from_patterns(card_text, brand, domain)
                 if result and result[1]:
                     return result[0], result[1], real_url
-                # Try title format: "John Smith - Founder at BrandName"
                 m = re.search(r'^([A-Z][a-z]+\s+[A-Z][a-z]+)\s*[-|]', card_text)
                 if m:
                     parts = m.group(1).split()
@@ -718,6 +731,51 @@ async def linkedin_dork(client, domain: str, brand: str, sem: asyncio.Semaphore,
 
 # ── TIER 4: Deep OSINT ────────────────────────────────────────────────────────
 
+def socket_whois_lookup(domain: str) -> Optional[Tuple[str, str]]:
+    """Direct Port 43 Socket WHOIS fallback for .us, .com, .org, .de, etc.
+    Extracts Registrant Name, Admin Name, or Owner directly from registry."""
+    parts = domain.lower().split('.')
+    if len(parts) < 2:
+        return None
+    tld = '.'.join(parts[-2:]) if len(parts) > 2 and parts[-2] in ('co', 'com', 'org', 'net') else parts[-1]
+    servers = {
+        'com': 'whois.verisign-grs.com', 'net': 'whois.verisign-grs.com',
+        'org': 'whois.pir.org', 'us': 'whois.nic.us',
+        'de': 'whois.denic.de', 'fr': 'whois.nic.fr', 'nl': 'whois.domain-registry.nl',
+        'io': 'whois.nic.io', 'shop': 'whois.nic.shop', 'site': 'whois.nic.site',
+        'store': 'whois.nic.store', 'info': 'whois.afilias.net', 'biz': 'whois.biz',
+    }
+    server = servers.get(tld)
+    if not server:
+        return None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(3.0)
+        s.connect((server, 43))
+        payload = (f'-T dn,ace {domain}\r\n' if tld == 'de' else f'{domain}\r\n').encode()
+        s.send(payload)
+        res = b''
+        while len(res) < 16384:
+            data = s.recv(4096)
+            if not data: break
+            res += data
+        s.close()
+        text = res.decode('utf-8', errors='ignore')
+        for line in text.splitlines():
+            m = re.search(r'(?:Registrant|Admin|Owner)\s*(?:Name|Contact)?[:\s]+([A-Za-z\s]+)$', line, re.I)
+            if m:
+                val = m.group(1).strip()
+                if val and not any(b in val.lower() for b in ['privacy', 'redacted', 'whoisguard', 'proxy', 'gdpr', 'contact', 'domains', 'service', 'inc', 'llc', 'ltd', 'corporation']):
+                    words = val.split()
+                    if 2 <= len(words) <= 3:
+                        fn, ln = words[0].capitalize(), words[-1].capitalize()
+                        if is_clean_human_name(f"{fn} {ln}", domain=domain):
+                            return fn, ln
+    except Exception:
+        pass
+    return None
+
+
 async def whois_rdap_lookup(client, domain: str, sem: asyncio.Semaphore, timeout: float) -> Optional[Tuple[str, str]]:
     for rdap_url in [
         f"https://rdap.verisign.com/com/v1/domain/{domain}",
@@ -725,25 +783,31 @@ async def whois_rdap_lookup(client, domain: str, sem: asyncio.Semaphore, timeout
     ]:
         try:
             html = await fetch(client, rdap_url, sem, timeout)
-            if not html:
-                continue
-            data = json.loads(html)
-            for entity in data.get('entities', []):
-                roles = entity.get('roles', [])
-                if 'registrant' in roles or 'administrative' in roles:
-                    vcard = entity.get('vcardArray', [])
-                    if vcard and len(vcard) > 1:
-                        for prop in vcard[1]:
-                            if prop[0] == 'fn':
-                                name = prop[3]
-                                if name and not any(w in name.lower() for w in ['privacy', 'proxy', 'redacted', 'whoisguard']):
-                                    parts = name.strip().split()
-                                    if len(parts) >= 2:
-                                        fn, ln = parts[0].capitalize(), parts[-1].capitalize()
-                                        if is_clean_human_name(f"{fn} {ln}"):
-                                            return fn, ln
+            if html:
+                data = json.loads(html)
+                for entity in data.get('entities', []):
+                    roles = entity.get('roles', [])
+                    if 'registrant' in roles or 'administrative' in roles:
+                        vcard = entity.get('vcardArray', [])
+                        if vcard and len(vcard) > 1:
+                            for prop in vcard[1]:
+                                if prop[0] == 'fn':
+                                    name = prop[3]
+                                    if name and not any(w in name.lower() for w in ['privacy', 'proxy', 'redacted', 'whoisguard']):
+                                        parts = name.strip().split()
+                                        if len(parts) >= 2:
+                                            fn, ln = parts[0].capitalize(), parts[-1].capitalize()
+                                            if is_clean_human_name(f"{fn} {ln}", domain=domain):
+                                                return fn, ln
         except Exception:
             continue
+
+    # Fallback to direct port 43 WHOIS in background thread
+    try:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, socket_whois_lookup, domain)
+    except Exception:
+        pass
     return None
 
 
