@@ -4,17 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       concurrency:
-        description: 'Concurrency per Worker (default 25)'
+        description: 'Concurrency per Worker (default 20)'
         required: false
-        default: '25'
+        default: '20'
       timeout:
-        description: 'HTTP request timeout in seconds (default 4.0)'
+        description: 'HTTP request timeout in seconds (default 10.0)'
         required: false
-        default: '4.0'
+        default: '10.0'
       batch_notify:
-        description: 'Leads per Telegram checkpoint (default 1000)'
+        description: 'Leads per Telegram checkpoint (default 500)'
         required: false
-        default: '1000'
+        default: '500'
   push:
     paths:
       - '.github/workflows/cluster_30_nodes.yml'
@@ -62,12 +62,12 @@ jobs:
           TELEGRAM_BOT_TOKEN: "8942730693:AAG9ERn1JgXInKiR_9MZJI3HPxCkjKvVtpE"
           TELEGRAM_CHAT_ID: "6642913680"
         run: |
-          python -u cluster_executive_enricher.py \
+          python -u ultra_enricher.py \
             --slice-id ${{ matrix.node_id }} \
             --total-slices 30 \
-            --concurrency ${{ github.event.inputs.concurrency || '25' }} \
-            --timeout ${{ github.event.inputs.timeout || '6.0' }} \
-            --batch-notify ${{ github.event.inputs.batch_notify || '1000' }} \
+            --concurrency ${{ github.event.inputs.concurrency || '20' }} \
+            --timeout ${{ github.event.inputs.timeout || '10.0' }} \
+            --batch-notify ${{ github.event.inputs.batch_notify || '500' }} \
             --input-csv data/FINAL_ALL_VERIFIED_LEADS_COMBINED.csv \
             --output-csv data/node_${{ matrix.node_id }}_executives.csv
 
