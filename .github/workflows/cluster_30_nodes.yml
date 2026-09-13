@@ -18,6 +18,7 @@ on:
   push:
     paths:
       - '.github/workflows/cluster_30_nodes.yml'
+      - 'ultra_enricher.py'
 
 jobs:
   cluster_node:
@@ -62,12 +63,19 @@ jobs:
           TELEGRAM_BOT_TOKEN: "8942730693:AAG9ERn1JgXInKiR_9MZJI3HPxCkjKvVtpE"
           TELEGRAM_CHAT_ID: "6642913680"
         run: |
+          CONCURRENCY="${{ github.event.inputs.concurrency }}"
+          [ -z "$CONCURRENCY" ] && CONCURRENCY="20"
+          TIMEOUT="${{ github.event.inputs.timeout }}"
+          [ -z "$TIMEOUT" ] && TIMEOUT="10.0"
+          BATCH_NOTIFY="${{ github.event.inputs.batch_notify }}"
+          [ -z "$BATCH_NOTIFY" ] && BATCH_NOTIFY="500"
+
           python -u ultra_enricher.py \
             --slice-id ${{ matrix.node_id }} \
             --total-slices 30 \
-            --concurrency ${{ github.event.inputs.concurrency || '20' }} \
-            --timeout ${{ github.event.inputs.timeout || '10.0' }} \
-            --batch-notify ${{ github.event.inputs.batch_notify || '500' }} \
+            --concurrency "$CONCURRENCY" \
+            --timeout "$TIMEOUT" \
+            --batch-notify "$BATCH_NOTIFY" \
             --input-csv data/FINAL_ALL_VERIFIED_LEADS_COMBINED.csv \
             --output-csv data/node_${{ matrix.node_id }}_executives.csv
 
